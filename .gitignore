@@ -1,0 +1,10 @@
+venv/
+models/
+data/
+database/*.db
+database/*.db-*
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.streamlit/
+.DS_Store
