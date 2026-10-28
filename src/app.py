@@ -10,6 +10,16 @@ from screens_admin import manage_users_screen, system_performance_screen
 
 st.set_page_config(page_title="SME Credit Risk DSS", layout="wide")
 
+# Hide the Deploy button and the Streamlit main menu
+hide_streamlit_style = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    .stAppDeployButton {display: none;}
+    footer {visibility: hidden;}
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 if not os.path.exists("database/credit_risk.db"):
     init_db()
 

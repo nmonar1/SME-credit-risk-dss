@@ -40,11 +40,46 @@ def manage_users_screen(conn):
     my_admin_id = get_admin_id(conn, me["user_id"])
     users = list_users(conn)
 
-    st.dataframe(pd.DataFrame([{
+    # Build the dataframe for the editor
+    df_users = pd.DataFrame([{
         "ID": u["user_id"], "Username": u["username"], "Role": ROLE_LABELS.get(u["role"], u["role"]),
         "Branch / access level": u["detail"] or "", "Managed by": u["managed_by"] or "",
         "Applications": "-" if u["applications"] is None else str(u["applications"]),
-        "Status": "Active" if u["is_active"] else "Deactivated"} for u in users]), hide_index=True)
+        "Status": "Active" if u["is_active"] else "Deactivated"} for u in users])
+
+    # Render the interactive data editor
+    edited_df = st.data_editor(
+        df_users,
+        hide_index=True,
+        disabled=["ID", "Username", "Role", "Branch / access level", "Managed by", "Applications"],
+        column_config={
+            "Status": st.column_config.SelectboxColumn(
+                "Status",
+                help="Change this dropdown to deactivate or reactivate the account.",
+                options=["Active", "Deactivated"],
+                required=True,
+            )
+        },
+        key="user_editor"
+    )
+
+    # Check if any statuses were changed
+    for idx, row in edited_df.iterrows():
+        original_status = df_users.iloc[idx]["Status"]
+        new_status = row["Status"]
+        
+        if new_status != original_status:
+            target_user_id = row["ID"]
+            target_username = row["Username"]
+            
+            # Prevent admins from deactivating themselves
+            if target_user_id == me["user_id"]:
+                st.error("You cannot deactivate your own account.")
+                st.rerun()
+            else:
+                set_user_active(conn, target_user_id, new_status == "Active")
+                _flash(f"{target_username} status updated to {new_status}.")
+                st.rerun()
 
     # ---------------- add a user ----------------
     st.subheader("Add a user")
@@ -78,7 +113,6 @@ def manage_users_screen(conn):
     uid = st.selectbox("User", list(by_id), key="edit_user",
                        format_func=lambda i: f"{by_id[i]['username']} ({ROLE_LABELS.get(by_id[i]['role'], by_id[i]['role'])})")
     user = by_id[uid]
-    is_self = uid == me["user_id"]
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -107,18 +141,8 @@ def manage_users_screen(conn):
 
     with col3:
         st.markdown("**Account status**")
-        if user["is_active"]:
-            if is_self:
-                st.caption("You cannot deactivate your own account.")
-            elif st.button("Deactivate account", key=f"deact_{uid}"):
-                set_user_active(conn, uid, False)
-                _flash(f"{user['username']} has been deactivated and can no longer sign in.")
-                st.rerun()
-        else:
-            if st.button("Reactivate account", key=f"react_{uid}"):
-                set_user_active(conn, uid, True)
-                _flash(f"{user['username']} has been reactivated.")
-                st.rerun()
+        st.caption("Use the dropdown in the table above to change a user's status.")
+
     st.caption("Accounts are deactivated rather than deleted, so the applications an officer handled stay on record.")
 
 
