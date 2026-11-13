@@ -7,11 +7,13 @@ import streamlit as st
 from database import save_application, save_risk_assessment, save_decision, list_applications, get_application
 from shap_explainer import explain_application
 from metrics import record_scoring_time
-from report_text import PORTFOLIO_DEFAULT_RATE, BAND_INFO, MODEL_NOTE, pct_short
+from report_text import PORTFOLIO_DEFAULT_RATE, BAND_INFO, MODEL_NOTE
+from theme import page_header, gauge, risk_spectrum, contribution_chart, kpi_cards, BRAND, LOW, MODERATE, ELEVATED, INK
 
 PRESET_PATH = "models/demo_presets.json"
 FORM_DEFAULTS = {"f_name": "", "f_emp": 0, "f_age": 0, "f_amt": 50000.0, "f_term": 60}
 FORM_KEYS = list(FORM_DEFAULTS) + ["f_sector", "f_date"]
+BAND_EMOJI = {"Low": "🟢 Low", "Moderate": "🟠 Moderate", "Elevated": "🔴 Elevated"}
 
 
 def _officer_id(conn):
@@ -37,7 +39,7 @@ def _apply_preset(preset):
 
 
 def submit_application_screen(conn, sector_list, naics_labels):
-    st.header("New SME Loan Application")
+    page_header("New Application", "Fill in the business and loan details")
     officer_id = _officer_id(conn)
 
     for key, default in FORM_DEFAULTS.items():
@@ -46,27 +48,26 @@ def submit_application_screen(conn, sector_list, naics_labels):
 
     presets = _load_presets()
     if presets:
-        st.caption("Demo examples: fill the form with a typical application from each risk band.")
-        cols = st.columns(len(presets))
+        cols = st.columns(len(presets) + 2)
         for col, (label, preset) in zip(cols, presets.items()):
-            col.button(f"Load example: {label}", key=f"preset_{label}",
-                       on_click=_apply_preset, args=(preset,))
+            col.button(f"Example: {label}", key=f"preset_{label}", on_click=_apply_preset, args=(preset,))
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns(2, gap="large")
     with c1:
-        business_name = st.text_input("Business Name", key="f_name")
-        sector_choice = st.selectbox("Industry Sector", sector_list, key="f_sector",
+        st.subheader("Business")
+        business_name = st.text_input("Business name", key="f_name")
+        sector_choice = st.selectbox("Industry sector", sector_list, key="f_sector",
                                      format_func=lambda c: f"{c} - {naics_labels.get(c, 'Unknown')}")
-        num_employees = st.number_input("Number of Employees", min_value=0, step=1, key="f_emp")
-        business_age = st.number_input("Business Age (years)", min_value=0, step=1, key="f_age")
+        num_employees = st.number_input("Number of employees", min_value=0, step=1, key="f_emp")
+        business_age = st.number_input("Business age (years)", min_value=0, step=1, key="f_age")
     with c2:
-        loan_amount = st.number_input("Loan Amount (USD)", min_value=1000.0, max_value=5500000.0,
+        st.subheader("Loan")
+        loan_amount = st.number_input("Loan amount (USD)", min_value=1000.0, max_value=5500000.0,
                                       step=1000.0, key="f_amt")
-        loan_term = st.number_input("Loan Term (months)", min_value=1, step=1, key="f_term")
-        application_date = st.date_input("Application Date", key="f_date")
-    
+        loan_term = st.number_input("Loan term (months)", min_value=1, step=1, key="f_term")
+        application_date = st.date_input("Application date", key="f_date")
 
-    if st.button("Submit Application", type="primary"):
+    if st.button("Get risk assessment", type="primary"):
         if not business_name.strip():
             st.error("Business name is required.")
             return
@@ -92,19 +93,8 @@ def submit_application_screen(conn, sector_list, naics_labels):
         st.rerun()
 
 
-def _contribution_chart(top_features):
-    try:
-        data = pd.DataFrame(json.loads(top_features)).set_index("feature")
-    except (ValueError, TypeError, KeyError):
-        st.caption(top_features or "")      # older rows stored a plain text string
-        return
-    st.caption("Influence of each input on this score: bars to the right push the risk up, "
-               "bars to the left push it down.")
-    st.bar_chart(data, horizontal=True)
-
-
 def _legend():
-    with st.expander("How to read this report"):
+    with st.expander("Risk band guide"):
         st.markdown(
             "| Band | Who falls in it | Past loans in this band that defaulted |\n|---|---|---|\n"
             f"| Low | the lowest-scoring {BAND_INFO['Low']['share']:.0%} of applications | {BAND_INFO['Low']['default_rate']:.0%} |\n"
@@ -122,29 +112,32 @@ def render_report(conn, officer_id, application_id, naics_labels):
         return
 
     status = row["application_status"]
-    st.subheader(f"{row['business_name']} (application #{application_id})")
-    st.caption(f"{row['application_date']} | {naics_labels.get(row['industry_type'], row['industry_type'])} | "
-               f"${row['loan_amount']:,.0f} | Status: {status}")
+    st.subheader(f"{row['business_name']}  ·  #{application_id}")
+    st.write(f"{row['application_date']}  |  {naics_labels.get(row['industry_type'], row['industry_type'])}  |  "
+             f"${row['loan_amount']:,.0f}  |  {status}")
 
     if row["risk_score"] is None:
         st.warning("No risk assessment is stored for this application.")
     else:
         score = float(row["risk_score"])
-        c1, c2 = st.columns(2)
-        c1.metric("Risk band", row["risk_classification"])
-        c2.metric("Similar past loans that defaulted", pct_short(score),
-                  delta=f"{(score - PORTFOLIO_DEFAULT_RATE) * 100:+.1f} pts vs average ({PORTFOLIO_DEFAULT_RATE:.1%})",
-                  delta_color="inverse")
-        st.markdown(row["plain_language_summary"])
-        _contribution_chart(row["top_features"])
+        left, right = st.columns([1, 2.2], gap="large")
+        with left:
+            gauge(score, row["risk_classification"],
+                  f"{(score - PORTFOLIO_DEFAULT_RATE) * 100:+.1f} pts vs the {PORTFOLIO_DEFAULT_RATE:.1%} average")
+        with right:
+            risk_spectrum(score)
+            st.markdown(row["plain_language_summary"])
+        st.subheader("What drove this score")
+        contribution_chart(row["top_features"])
         _legend()
 
     if status == "Pending":
-        st.subheader("Record your decision")
-        decision = st.radio("Decision", ["Approve", "Reject"], key=f"dec_{application_id}", horizontal=True)
+        st.subheader("Your decision")
+        decision = st.radio("Decision", ["Approve", "Reject"], key=f"dec_{application_id}", horizontal=True,
+                            label_visibility="collapsed")
         note = st.text_area("Reason (required)" if decision == "Reject" else "Notes (optional)",
                             key=f"note_{application_id}", max_chars=255)
-        if st.button("Confirm Decision", key=f"confirm_{application_id}"):
+        if st.button("Confirm decision", key=f"confirm_{application_id}", type="primary"):
             if decision == "Reject" and not note.strip():
                 st.error("A reason is required to reject an application.")
             else:
@@ -158,21 +151,27 @@ def render_report(conn, officer_id, application_id, naics_labels):
     if row["risk_score"] is not None:
         report = (f"SME Credit Risk Report\nApplication #{application_id}\nBusiness: {row['business_name']}\n"
                   f"Loan Amount: ${row['loan_amount']:,.2f}\nRisk band: {row['risk_classification']}\n"
-                  f"Similar past loans that defaulted: {pct_short(float(row['risk_score']))}\nStatus: {status}\n\n"
+                  f"Similar past loans that defaulted: {float(row['risk_score']) * 100:.0f}%\nStatus: {status}\n\n"
                   f"{row['plain_language_summary'].replace('**', '')}\n")
-        st.download_button("Download Report", report, file_name=f"risk_report_app{application_id}.txt",
+        st.download_button("Download report", report, file_name=f"risk_report_app{application_id}.txt",
                            key=f"dl_{application_id}")
 
 
 def my_applications_screen(conn, naics_labels):
-    st.header("My Applications")
+    page_header("My Applications", "Everything you have submitted")
     officer_id = _officer_id(conn)
     rows = list_applications(conn, officer_id)
     if not rows:
         st.info("You have not submitted any applications yet.")
         return
 
-    status_filter = st.radio("Show", ["All", "Pending", "Approved", "Rejected"], horizontal=True)
+    kpi_cards([("Submitted", len(rows), INK),
+               ("Pending", sum(r["application_status"] == "Pending" for r in rows), MODERATE),
+               ("Approved", sum(r["application_status"] == "Approved" for r in rows), LOW),
+               ("Rejected", sum(r["application_status"] == "Rejected" for r in rows), ELEVATED)])
+
+    status_filter = st.radio("Show", ["All", "Pending", "Approved", "Rejected"], horizontal=True,
+                             label_visibility="collapsed")
     shown = [r for r in rows if status_filter == "All" or r["application_status"] == status_filter]
     if not shown:
         st.info(f"No {status_filter.lower()} applications.")
@@ -181,18 +180,19 @@ def my_applications_screen(conn, naics_labels):
     st.dataframe(pd.DataFrame([{
         "ID": r["application_id"], "Business": r["business_name"],
         "Sector": naics_labels.get(r["industry_type"], r["industry_type"]),
-        "Loan amount": f"${r['loan_amount']:,.0f}", "Risk band": r["risk_classification"],
-        "Past default rate": pct_short(float(r["risk_score"])) if r["risk_score"] is not None else "",
+        "Loan amount": f"${r['loan_amount']:,.0f}",
+        "Risk band": BAND_EMOJI.get(r["risk_classification"], r["risk_classification"] or ""),
+        "Default risk": float(r["risk_score"]) * 100 if r["risk_score"] is not None else None,
         "Status": r["application_status"], "Date": r["application_date"]} for r in shown]),
-        hide_index=True)
+        hide_index=True, use_container_width=True,
+        column_config={"Default risk": st.column_config.ProgressColumn(
+            "Default risk", format="%.0f%%", min_value=0, max_value=100)})
 
     ids = [r["application_id"] for r in shown]
     # labels must not contain the status: if they did, approving an application would change the
     # label and Streamlit would treat the selectbox as a new widget and jump to another application
     names = {r["application_id"]: f"#{r['application_id']} - {r['business_name']}" for r in shown}
 
-    # Decide which application the dropdown should show BEFORE the widget is created.
-    # (Do not pass index= to the selectbox: a changing index makes Streamlit forget the user's choice.)
     pending = st.session_state.pop("pending_open", None)
     if pending is not None:
         st.session_state["open_select"] = pending
