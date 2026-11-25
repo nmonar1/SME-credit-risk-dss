@@ -30,11 +30,43 @@ def conn(tmp_path):
     db.migrate_db(c)
     return c
 
+@pytest.fixture
+def admin_user(conn):
+    user_id = db.create_user(
+        conn, "test_admin", "AdminPass123", "admin"
+    )
+
+    cur = conn.execute(
+        """
+        INSERT INTO system_administrators (user_id, access_level)
+        VALUES (?, ?)
+        """,
+        (user_id, "Full access")
+    )
+
+    conn.commit()
+
+    return {
+        "user_id": user_id,
+        "admin_id": cur.lastrowid
+    }
 
 def make_officer(conn, name="officer1"):
-    user_id = db.add_user(conn, name, "password123", "loan_officer", "Westlands, Nairobi County", None)
-    officer_id = conn.execute("SELECT officer_id FROM loan_officers WHERE user_id=?", (user_id,)).fetchone()[0]
-    return user_id, officer_id
+    user_id = db.create_user(
+        conn, name, "password123", "loan_officer"
+    )
+
+    cur = conn.execute(
+        """
+        INSERT INTO loan_officers (user_id, branch_office)
+        VALUES (?, ?)
+        """,
+        (user_id, "Westlands, Nairobi County")
+    )
+
+    conn.commit()
+
+    return user_id, cur.lastrowid
 
 
 APP = {"business_name": "Mama Njeri Supplies", "industry_type": "44", "num_employees": 5, "business_age": 3,
@@ -65,13 +97,26 @@ def test_U03_login_correct_wrong_and_unknown(conn):
     assert db.authenticate(conn, "nobody", "MySecret99") is None
 
 
-def test_U04_deactivated_account_is_flagged_inactive(conn):
-    uid = db.create_user(conn, "bob", "MySecret99", "loan_officer")
+def test_U04_deactivated_account_is_flagged_inactive(conn, admin_user):
+    uid = db.create_user(
+        conn, "bob", "MySecret99", "loan_officer"
+    )
+
     assert db.authenticate(conn, "bob", "MySecret99")["active"] is True
-    db.set_user_active(conn, uid, False)
+
+    db.set_user_active(
+        conn, uid, False,
+        actor_user_id=admin_user["user_id"]
+    )
+
     assert db.authenticate(conn, "bob", "MySecret99")["active"] is False
     assert db.is_user_active(conn, uid) is False
-    db.set_user_active(conn, uid, True)
+
+    db.set_user_active(
+        conn, uid, True,
+        actor_user_id=admin_user["user_id"]
+    )
+
     assert db.is_user_active(conn, uid) is True
 
 
@@ -80,20 +125,47 @@ def test_U05_password_longer_than_72_bytes_is_rejected(conn):
     assert db.authenticate(conn, "carol", "x" * 100) is None
 
 
-def test_U06_duplicate_username_is_rejected_and_nothing_is_left_behind(conn):
-    db.add_user(conn, "dave", "password123", "loan_officer", "CBD, Nairobi County", None)
+def test_U06_duplicate_username_is_rejected_and_nothing_is_left_behind(conn, admin_user):
+    db.add_user(
+        conn, "dave", "password123", "loan_officer",
+        "CBD, Nairobi County",
+        admin_user["admin_id"],
+        actor_user_id=admin_user["user_id"]
+    )
+
     with pytest.raises(sqlite3.IntegrityError):
-        db.add_user(conn, "dave", "password123", "loan_officer", "CBD, Nairobi County", None)
-    assert conn.execute("SELECT COUNT(*) FROM users WHERE username='dave'").fetchone()[0] == 1
-    assert conn.execute("SELECT COUNT(*) FROM loan_officers").fetchone()[0] == 1
+        db.add_user(
+            conn, "dave", "password123", "loan_officer",
+            "CBD, Nairobi County",
+            admin_user["admin_id"],
+            actor_user_id=admin_user["user_id"]
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM users WHERE username='dave'"
+    ).fetchone()[0] == 1
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM loan_officers"
+    ).fetchone()[0] == 1
 
 
-def test_U07_reset_password_changes_login(conn):
-    uid = db.create_user(conn, "eve", "OldPass123", "loan_officer")
-    db.reset_password(conn, uid, "NewPass456")
+def test_U07_reset_password_changes_login(conn, admin_user):
+    uid = db.create_user(
+        conn, "eve", "OldPass123", "loan_officer"
+    )
+
+    db.reset_password(
+        conn, uid, "NewPass456",
+        actor_user_id=admin_user["user_id"]
+    )
+
     assert db.authenticate(conn, "eve", "OldPass123") is None
-    assert db.authenticate(conn, "eve", "NewPass456") is not None
 
+    user = db.authenticate(conn, "eve", "NewPass456")
+
+    assert user is not None
+    assert user["must_change_password"] is True
 
 # ---------------------------------------------------------------- U08 to U12: applications and decisions
 def test_U08_new_application_starts_pending_without_assessment(conn):
@@ -212,3 +284,310 @@ def test_U20_full_explanation_output_is_complete(se):
     features = json.loads(result["top_features"])
     assert len(features) == 4
     assert "decision support, not a decision" in result["plain_language_summary"]
+
+    # ---------------------------------------------------------------- U21 to U32: enhanced security
+
+def test_U21_new_account_requires_password_change(conn, admin_user):
+    db.add_user(
+        conn, "new_officer", "TempPass123", "loan_officer",
+        "CBD, Nairobi County",
+        admin_user["admin_id"],
+        actor_user_id=admin_user["user_id"]
+    )
+
+    user = db.authenticate(conn, "new_officer", "TempPass123")
+
+    assert user is not None
+    assert user["must_change_password"] is True
+
+
+def test_U22_successful_password_change(conn, admin_user):
+    uid = db.add_user(
+        conn, "new_officer", "TempPass123", "loan_officer",
+        "CBD, Nairobi County",
+        admin_user["admin_id"],
+        actor_user_id=admin_user["user_id"]
+    )
+
+    success, message = db.change_password(
+        conn, uid, "TempPass123", "PersonalPass456"
+    )
+
+    assert success is True
+    assert db.authenticate(conn, "new_officer", "TempPass123") is None
+
+    user = db.authenticate(conn, "new_officer", "PersonalPass456")
+
+    assert user is not None
+    assert user["must_change_password"] is False
+
+
+def test_U23_incorrect_current_password_is_rejected(conn):
+    uid = db.create_user(
+        conn, "officer", "OriginalPass123", "loan_officer"
+    )
+
+    success, message = db.change_password(
+        conn, uid, "WrongPassword", "NewPassword123"
+    )
+
+    assert success is False
+    assert db.authenticate(conn, "officer", "OriginalPass123") is not None
+
+
+def test_U24_weak_or_reused_password_is_rejected(conn):
+    uid = db.create_user(
+        conn, "officer", "OriginalPass123", "loan_officer"
+    )
+
+    for new_password in ("abc", "OriginalPass123", "x" * 73):
+        success, message = db.change_password(
+            conn, uid, "OriginalPass123", new_password
+        )
+
+        assert success is False
+
+    assert db.authenticate(conn, "officer", "OriginalPass123") is not None
+
+@pytest.fixture
+def limited_admin(conn, admin_user):
+    uid = db.add_user(
+        conn, "limited_admin", "TempAdmin123", "admin",
+        "Limited access",
+        admin_user["admin_id"],
+        actor_user_id=admin_user["user_id"]
+    )
+
+    success, message = db.change_password(
+        conn, uid, "TempAdmin123", "PersonalAdmin456"
+    )
+
+    assert success is True
+
+    return uid
+
+
+def test_U25_limited_admin_cannot_create_accounts(conn, limited_admin):
+    with pytest.raises(PermissionError):
+        db.add_user(
+            conn, "unauthorized_user", "Password123",
+            "loan_officer", "CBD, Nairobi County",
+            db.get_admin_id(conn, limited_admin),
+            actor_user_id=limited_admin
+        )
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM users WHERE username='unauthorized_user'"
+    ).fetchone()[0] == 0
+
+
+def test_U26_limited_admin_cannot_reset_passwords(conn, limited_admin):
+    uid, _ = make_officer(conn)
+
+    with pytest.raises(PermissionError):
+        db.reset_password(
+            conn, uid, "NewPassword123",
+            actor_user_id=limited_admin
+        )
+
+    assert db.authenticate(conn, "officer1", "password123") is not None
+
+
+def test_U27_limited_admin_cannot_deactivate_users(conn, limited_admin):
+    uid, _ = make_officer(conn)
+
+    with pytest.raises(PermissionError):
+        db.set_user_active(
+            conn, uid, False,
+            actor_user_id=limited_admin
+        )
+
+    assert db.is_user_active(conn, uid) is True
+
+
+def test_U28_limited_admin_cannot_modify_access_level(conn, limited_admin):
+    with pytest.raises(PermissionError):
+        db.update_user_detail(
+            conn, limited_admin, "Full access",
+            actor_user_id=limited_admin
+        )
+
+    assert db.get_admin_access_level(conn, limited_admin) == "Limited access"
+
+def test_U29_admin_cannot_deactivate_own_account(conn, admin_user):
+    uid = admin_user["user_id"]
+
+    with pytest.raises(PermissionError):
+        db.set_user_active(
+            conn, uid, False,
+            actor_user_id=uid
+        )
+
+    assert db.is_user_active(conn, uid) is True
+
+
+def test_U30_admin_cannot_downgrade_own_access(conn, admin_user):
+    uid = admin_user["user_id"]
+
+    with pytest.raises(PermissionError):
+        db.update_user_detail(
+            conn, uid, "Limited access",
+            actor_user_id=uid
+        )
+
+    assert db.get_admin_access_level(conn, uid) == "Full access"
+
+
+def test_U31_loan_officer_cannot_manage_users(conn):
+    uid, _ = make_officer(conn)
+
+    with pytest.raises(PermissionError):
+        db.set_user_active(
+            conn, uid, False,
+            actor_user_id=uid
+        )
+
+    assert db.is_user_active(conn, uid) is True
+
+
+def test_U32_temporary_password_blocks_admin_actions(conn, admin_user):
+    uid = db.add_user(
+        conn, "new_admin", "TempAdmin123", "admin",
+        "Full access",
+        admin_user["admin_id"],
+        actor_user_id=admin_user["user_id"]
+    )
+
+    assert db.has_full_admin_access(conn, uid) is False
+
+    with pytest.raises(PermissionError):
+        db.add_user(
+            conn, "blocked_user", "Password123",
+            "loan_officer", "CBD, Nairobi County",
+            db.get_admin_id(conn, uid),
+            actor_user_id=uid
+        )
+
+    success, message = db.change_password(
+        conn, uid, "TempAdmin123", "PersonalAdmin456"
+    )
+
+    assert success is True
+    assert db.has_full_admin_access(conn, uid) is True
+
+
+# ---------- U33 to U37: Session security ----------
+
+def test_U33_password_reset_invalidates_session(conn, admin_user):
+    uid, _ = make_officer(conn)
+
+    old_session = db.authenticate(
+        conn, "officer1", "password123"
+    )
+
+    db.reset_password(
+        conn, uid, "TemporaryPass123",
+        actor_user_id=admin_user["user_id"]
+    )
+
+    status = db.get_session_status(conn, uid)
+
+    assert status["session_version"] == old_session["session_version"] + 1
+    assert status["must_change_password"] is True
+
+    assert db.authenticate(
+        conn, "officer1", "password123"
+    ) is None
+
+
+def test_U34_password_change_invalidates_session(conn):
+    uid, _ = make_officer(conn)
+
+    old_session = db.authenticate(
+        conn, "officer1", "password123"
+    )
+
+    success, message = db.change_password(
+        conn, uid, "password123", "PersonalPass456"
+    )
+
+    assert success is True
+
+    status = db.get_session_status(conn, uid)
+
+    assert status["session_version"] == old_session["session_version"] + 1
+    assert status["must_change_password"] is False
+
+    new_session = db.authenticate(
+        conn, "officer1", "PersonalPass456"
+    )
+
+    assert new_session is not None
+    assert new_session["session_version"] == status["session_version"]
+
+
+def test_U35_deactivation_and_reactivation_invalidate_session(
+    conn, admin_user
+):
+    uid, _ = make_officer(conn)
+
+    old_session = db.authenticate(
+        conn, "officer1", "password123"
+    )
+
+    db.set_user_active(
+        conn, uid, False,
+        actor_user_id=admin_user["user_id"]
+    )
+
+    status = db.get_session_status(conn, uid)
+
+    assert status["active"] is False
+    assert status["session_version"] == old_session["session_version"] + 1
+
+    db.set_user_active(
+        conn, uid, True,
+        actor_user_id=admin_user["user_id"]
+    )
+
+    status = db.get_session_status(conn, uid)
+
+    assert status["active"] is True
+    assert status["session_version"] == old_session["session_version"] + 2
+
+
+def test_U36_access_level_change_invalidates_session(
+    conn, admin_user, limited_admin
+):
+    old_status = db.get_session_status(conn, limited_admin)
+
+    db.update_user_detail(
+        conn, limited_admin, "Full access",
+        actor_user_id=admin_user["user_id"]
+    )
+
+    new_status = db.get_session_status(conn, limited_admin)
+
+    assert new_status["session_version"] == old_status["session_version"] + 1
+    assert db.get_admin_access_level(conn, limited_admin) == "Full access"
+    assert db.has_full_admin_access(conn, limited_admin) is True
+
+
+def test_U37_failed_password_change_preserves_session(conn):
+    uid, _ = make_officer(conn)
+
+    old_status = db.get_session_status(conn, uid)
+
+    success, message = db.change_password(
+        conn, uid, "IncorrectPassword", "NewPassword123"
+    )
+
+    assert success is False
+
+    new_status = db.get_session_status(conn, uid)
+
+    assert new_status["session_version"] == old_status["session_version"]
+
+    assert db.authenticate(
+        conn, "officer1", "password123"
+    ) is not None
